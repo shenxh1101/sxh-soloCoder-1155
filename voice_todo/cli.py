@@ -1,6 +1,7 @@
 import cmd
 import sys
 import os
+import json
 import threading
 import time
 from datetime import datetime, date
@@ -75,6 +76,12 @@ class VoiceTodoCLI(cmd.Cmd):
         self._reminder_running = False
         self._startup_check()
 
+    def _get_user_setting(self, key: str, default=None):
+        val = self.storage.get_user_config(key)
+        if val is not None:
+            return val
+        return self.config.get(key, default)
+
     def _startup_check(self):
         self.storage.clear_old_reminders()
         generated = self.storage.generate_recurring_tasks()
@@ -84,7 +91,7 @@ class VoiceTodoCLI(cmd.Cmd):
         self._check_auto_briefing()
 
     def _check_auto_briefing(self):
-        briefing_time_str = self.config.get("briefing_time", "08:00")
+        briefing_time_str = self._get_user_setting("briefing_time", "08:00")
         briefing_state = self.storage.get_briefing_state()
         last_date = briefing_state.get("last_briefing_date", "")
         today_str = date.today().isoformat()
@@ -109,7 +116,7 @@ class VoiceTodoCLI(cmd.Cmd):
         print("\n\u23F0 \u6BCF\u65E5\u7B80\u62A5\u65F6\u95F4\u5230\u4E86\uFF0C\u6B63\u5728\u64AD\u62A5\u4ECA\u65E5\u5F85\u529E\u4E8B\u9879...")
         try:
             speak_briefing(tasks, self.user_manager.current_user,
-                          rate=int(self.config.get("tts_rate", 160)))
+                          rate=int(self._get_user_setting("tts_rate", 160)))
         except Exception:
             print_briefing(tasks, self.user_manager.current_user)
         self.storage.set_briefing_done(today_str)
@@ -121,19 +128,53 @@ class VoiceTodoCLI(cmd.Cmd):
         self._reminder_thread = threading.Thread(target=self._reminder_loop, daemon=True)
         self._reminder_thread.start()
 
+    def _check_briefing_daemon(self):
+        if not self._reminder_running:
+            return
+        briefing_time_str = self._get_user_setting("briefing_time", "08:00")
+        briefing_state = self.storage.get_briefing_state()
+        last_date = briefing_state.get("last_briefing_date", "")
+        today_str = date.today().isoformat()
+        if last_date == today_str:
+            return
+
+        now = datetime.now()
+        try:
+            h, m = map(int, briefing_time_str.split(":"))
+        except (ValueError, TypeError):
+            return
+
+        current_minutes = now.hour * 60 + now.minute
+        target_minutes = h * 60 + m
+        diff = current_minutes - target_minutes
+        if 0 <= diff <= 1:
+            tasks = self.storage.list_today()
+            if tasks:
+                print("\n\u23F0 \u6BCF\u65E5\u7B80\u62A5\u65F6\u95F4\u5230\u4E86\uFF0C\u6B63\u5728\u64AD\u62A5\u4ECA\u65E5\u5F85\u529E\u4E8B\u9879...")
+                try:
+                    speak_briefing(tasks, self.user_manager.current_user,
+                                  rate=int(self._get_user_setting("tts_rate", 160)))
+                except Exception:
+                    print_briefing(tasks, self.user_manager.current_user)
+                self.storage.set_briefing_done(today_str)
+
     def _reminder_loop(self):
         while self._reminder_running:
             try:
-                due = self.storage.get_due_reminders(window_minutes=30)
-                for task in due:
-                    if not self.storage.has_reminded(task.task_id):
-                        self.storage.mark_reminded(task.task_id)
-                        reminder_text = self._build_reminder_text(task)
-                        print(f"\n\u23F0 {reminder_text}")
-                        try:
-                            speak(reminder_text, blocking=False)
-                        except Exception:
-                            pass
+                if hasattr(self, 'user_manager') and hasattr(self, 'storage'):
+                    self._check_briefing_daemon()
+                    due = self.storage.get_due_reminders(window_seconds=60)
+                    missed = self.storage.get_missed_reminders()
+
+                    for task in list(due) + list(missed):
+                        if not self.storage.has_reminded(task.task_id):
+                            self.storage.mark_reminded(task.task_id)
+                            reminder_text = self._build_reminder_text(task)
+                            print(f"\n\u23F0 {reminder_text}")
+                            try:
+                                speak(reminder_text, blocking=False)
+                            except Exception:
+                                pass
             except Exception:
                 pass
             time.sleep(30)
@@ -246,8 +287,8 @@ class VoiceTodoCLI(cmd.Cmd):
             return
 
         try:
-            lang = self.config.get("asr_language", "zh-CN")
-            engine = self.config.get("asr_engine", "google")
+            lang = self._get_user_setting("asr_language", "zh-CN")
+            engine = self._get_user_setting("asr_engine", "google")
             text = recognize_speech(language=lang, engine=engine)
         except RuntimeError as e:
             print(f"\u274C {e}")
@@ -591,7 +632,7 @@ class VoiceTodoCLI(cmd.Cmd):
         tasks = self.storage.list_today()
         if "speak" in arg.lower():
             speak_briefing(tasks, self.user_manager.current_user,
-                          rate=int(self.config.get("tts_rate", 160)))
+                          rate=int(self._get_user_setting("tts_rate", 160)))
         else:
             print_briefing(tasks, self.user_manager.current_user)
 
@@ -664,17 +705,62 @@ class VoiceTodoCLI(cmd.Cmd):
         speak(arg.strip())
 
     def do_config(self, arg: str):
-        """\u67E5\u770B\u6216\u4FEE\u6539\u914D\u7F6E: config [key] [value]"""
-        parts = arg.strip().split(maxsplit=2)
+        """\u67E5\u770B\u6216\u4FEE\u6539\u914D\u7F6E: config [key] [value] | config user <key> [value]"""
+        arg = arg.strip()
+        scope = "user"
+
+        if arg.startswith("global "):
+            scope = "global"
+            arg = arg[7:].strip()
+        elif arg.startswith("user "):
+            scope = "user"
+            arg = arg[5:].strip()
+
+        parts = arg.split(maxsplit=2)
         if not parts[0]:
+            user_keys = set()
+            user_config = {}
+            if os.path.exists(self.storage.user_config_path):
+                with open(self.storage.user_config_path, "r", encoding="utf-8") as f:
+                    user_config = json.load(f)
+
+            print(f"\n  {'\u2500' * 36}")
+            print(f"  \u7528\u6237\u914D\u7F6E ({self.user_manager.current_user}):")
+            if user_config:
+                for key, value in sorted(user_config.items()):
+                    print(f"    {key}: {value}")
+                    user_keys.add(key)
+            else:
+                print("    (\u672A\u8BBE\u7F6E)")
+            print(f"  {'\u2500' * 36}")
+            print(f"  \u5168\u5C40\u914D\u7F6E:")
             for key, value in sorted(self.config._data.items()):
-                print(f"  {key}: {value}")
+                mark = " (\u5DF2\u7528\u6237\u8986\u76D6)" if key in user_keys else ""
+                print(f"    {key}: {value}{mark}")
+            print(f"  {'\u2500' * 36}\n")
             return
+
         if len(parts) == 1:
-            print(f"  {parts[0]}: {self.config.get(parts[0], '(\u672A\u8BBE\u7F6E)')}")
+            val = self._get_user_setting(parts[0])
+            print(f"  {parts[0]}: {val if val is not None else '(\u672A\u8BBE\u7F6E)'}")
+            return
+
+        val_str = parts[1]
+        if scope == "user":
+            try:
+                if val_str.isdigit():
+                    val = int(val_str)
+                elif val_str.lower() in ("true", "false"):
+                    val = val_str.lower() == "true"
+                else:
+                    val = val_str
+            except ValueError:
+                val = val_str
+            self.storage.set_user_config(parts[0], val)
+            print(f"\u2705 \u7528\u6237\u914D\u7F6E {parts[0]} = {val}")
         else:
-            self.config.set(parts[0], parts[1])
-            print(f"\u2705 {parts[0]} = {parts[1]}")
+            self.config.set(parts[0], val_str)
+            print(f"\u2705 \u5168\u5C40\u914D\u7F6E {parts[0]} = {val_str}")
 
     def do_exit(self, arg: str):
         """\u9000\u51FA\u7A0B\u5E8F"""

@@ -197,7 +197,7 @@ class TaskStorage:
         self.save()
         return True
 
-    def get_due_reminders(self, window_minutes: int = 15) -> list[Task]:
+    def get_due_reminders(self, window_seconds: int = 60) -> list[Task]:
         now = datetime.now()
         result = []
         for t in self._tasks.values():
@@ -210,7 +210,26 @@ class TaskStorage:
                 continue
             remind_at = dt - timedelta(minutes=t.reminder_minutes)
             time_diff = (remind_at - now).total_seconds()
-            if 0 <= time_diff <= window_minutes * 60:
+            if 0 <= time_diff <= window_seconds:
+                result.append(t)
+        result.sort(key=lambda t: t.due_date or "")
+        return result
+
+    def get_missed_reminders(self) -> list[Task]:
+        now = datetime.now()
+        result = []
+        for t in self._tasks.values():
+            if t.status != TaskStatus.PENDING:
+                continue
+            if t.reminder_minutes is None:
+                continue
+            dt = _parse_due_datetime(t.due_date)
+            if dt is None:
+                continue
+            if dt <= now:
+                continue
+            remind_at = dt - timedelta(minutes=t.reminder_minutes)
+            if remind_at < now < dt:
                 result.append(t)
         result.sort(key=lambda t: t.due_date or "")
         return result
@@ -269,8 +288,12 @@ class TaskStorage:
             t for t in self._tasks.values()
             if t.source_template_id == template.task_id
         ]
+        archived_instances = [
+            t for t in self._archived.values()
+            if t.source_template_id == template.task_id
+        ]
         existing = {}
-        for t in existing_instances:
+        for t in existing_instances + archived_instances:
             if t.due_date:
                 try:
                     d = datetime.fromisoformat(t.due_date).date().isoformat()
