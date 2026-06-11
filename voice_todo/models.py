@@ -44,6 +44,9 @@ class Task:
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     completed_at: Optional[str] = None
     archived_at: Optional[str] = None
+    recurrence: Optional[str] = None
+    reminder_minutes: Optional[int] = None
+    source_template_id: Optional[str] = None
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -54,8 +57,8 @@ class Task:
     @classmethod
     def from_dict(cls, d: dict) -> "Task":
         d = dict(d)
-        d["priority"] = Priority(d["priority"])
-        d["status"] = TaskStatus(d["status"])
+        d["priority"] = Priority(d.get("priority", 2))
+        d["status"] = TaskStatus(d.get("status", "pending"))
         return cls(**d)
 
     def mark_done(self):
@@ -73,3 +76,41 @@ class Task:
     def restore(self):
         self.status = TaskStatus.PENDING
         self.archived_at = None
+
+    @property
+    def is_template(self) -> bool:
+        return bool(self.recurrence)
+
+    @property
+    def recurrence_label(self) -> str:
+        if not self.recurrence:
+            return ""
+        if self.recurrence == "daily":
+            return "每天"
+        if self.recurrence.startswith("weekly:"):
+            try:
+                wd = int(self.recurrence.split(":")[1])
+                names = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+                return f"每{names[wd]}"
+            except (ValueError, IndexError):
+                return "每周"
+        if self.recurrence.startswith("monthly:"):
+            try:
+                day = int(self.recurrence.split(":")[1])
+                return f"每月{day}号"
+            except (ValueError, IndexError):
+                return "每月"
+        return self.recurrence
+
+    @property
+    def reminder_label(self) -> str:
+        if self.reminder_minutes is None:
+            return "关闭"
+        if self.reminder_minutes == 0:
+            return "准点"
+        if self.reminder_minutes < 60:
+            return f"提前{self.reminder_minutes}分钟"
+        hours = self.reminder_minutes / 60
+        if hours == int(hours):
+            return f"提前{int(hours)}小时"
+        return f"提前{self.reminder_minutes}分钟"
